@@ -1,0 +1,77 @@
+name: Build Home Assistant (Latest / Auto 32K)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versao do Home Assistant (ou "latest" para a mais recente)'
+        required: false
+        default: 'latest'
+  schedule:
+    # Roda automaticamente todo domingo as 03:00 UTC para manter sempre a versao mais recente
+    - cron: '0 3 * * 0'
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detectar versao do Home Assistant e configurar tags
+        id: setup_version
+        run: |
+          # 1. Ajusta o nome do usuario para letras minusculas (exigencia do Docker)
+          REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${REPO_OWNER}/homeassistant-qnap-32k"
+          echo "IMAGE=${IMAGE}" >> $GITHUB_ENV
+
+          # 2. Obtem a versao informada ou busca a ultima estavel via API do GitHub
+          INPUT_VER="${{ github.event.inputs.version }}"
+          if [ -z "$INPUT_VER" ] || [ "$INPUT_VER" = "latest" ]; then
+            LATEST_TAG=$(curl -s https://api.github.com/repos/home-assistant/core/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            echo "Ultima versao oficial detectada: ${LATEST_TAG}"
+            TARGET_VERSION="${LATEST_TAG}"
+          else
+            echo "Versao manual solicitada: ${INPUT_VER}"
+            TARGET_VERSION="${INPUT_VER}"
+          fi
+          
+          echo "HA_VERSION=${TARGET_VERSION}" >> $GITHUB_ENV
+          echo "TAG_EXACT=${IMAGE}:${TARGET_VERSION}" >> $GITHUB_ENV
+          echo "TAG_LATEST=${IMAGE}:latest" >> $GITHUB_ENV
+
+      - name: Set up QEMU (Emulador ARM)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm/v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm/v7
+          push: true
+          build-args: |
+            HA_VERSION=${{ env.HA_VERSION }}
+          tags: |
+            ${{ env.TAG_EXACT }}
+            ${{ env.TAG_LATEST }}
