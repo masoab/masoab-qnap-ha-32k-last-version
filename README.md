@@ -1,0 +1,1 @@
+# masoab-qnap-ha-32k-last-version
