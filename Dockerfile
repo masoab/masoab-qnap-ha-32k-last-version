@@ -10,10 +10,11 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV TZ=America/Sao_Paulo
 ENV DISABLE_JEMALLOC=True
 ENV PYTHONUNBUFFERED=1
-ENV PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+ENV PATH="/usr/local/bin:/root/.local/bin:/root/.cargo/bin:$PATH"
 
-# 1. Instala dependencias do sistema Ubuntu 22.04 (inclui glibc e libstdc++6 compativeis com 32k)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 1. Habilita repositorios universe/multiverse e instala dependencias do sistema
+RUN sed -i 's/main restricted/main restricted universe multiverse/g' /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
@@ -28,19 +29,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Instala o uv (gerenciador ultrarrapido de Python)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+# 2. Instala o uv e copia para /usr/local/bin
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    (cp /root/.local/bin/uv* /usr/local/bin/ 2>/dev/null || cp /root/.cargo/bin/uv* /usr/local/bin/ 2>/dev/null || true)
 
-# 3. Cria o ambiente virtual com a versao de Python necessária (3.14)
+# 3. Cria o ambiente virtual com Python 3.14 (com pip, setuptools e wheel pré-instalados)
 ARG PYTHON_VERSION=3.14
-RUN uv venv /homeassistant/.venv --python ${PYTHON_VERSION}
+RUN uv venv /homeassistant/.venv --python ${PYTHON_VERSION} --seed
 
-# 4. Instala a versao solicitada do Home Assistant (ou a mais recente se for 'latest')
+# 4. Instala a versao solicitada do Home Assistant usando uv pip
 ARG HA_VERSION=latest
 RUN if [ "$HA_VERSION" = "latest" ]; then \
-        /homeassistant/.venv/bin/pip install --no-cache-dir homeassistant; \
+        uv pip install --python /homeassistant/.venv homeassistant; \
     else \
-        /homeassistant/.venv/bin/pip install --no-cache-dir homeassistant==${HA_VERSION}; \
+        uv pip install --python /homeassistant/.venv homeassistant==${HA_VERSION}; \
     fi
 
 WORKDIR /config
