@@ -1,48 +1,27 @@
 # ==============================================================================
-# Dockerfile: Home Assistant Latest / Dynamic Version para QNAP ARM (Kernel 32K)
+# Dockerfile: Home Assistant Latest para QNAP ARM (Kernel 32K Page Size)
 # ==============================================================================
-FROM arm32v7/ubuntu:22.04
+FROM albertogeniola/homeassistant-qnap-32k:latest
 
 LABEL maintainer="QNAP 32K Home Assistant Auto-Builder"
-LABEL description="Home Assistant compativel com QNAP 32K Page Size (Universal)"
+LABEL description="Home Assistant compativel com QNAP 32K Page Size"
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV TZ=America/Sao_Paulo
 ENV DISABLE_JEMALLOC=True
-ENV PYTHONUNBUFFERED=1
-ENV PATH="/usr/local/bin:/root/.local/bin:/root/.cargo/bin:$PATH"
 
-# 1. Habilita repositorios universe/multiverse e instala dependencias do sistema
-RUN sed -i 's/main restricted/main restricted universe multiverse/g' /etc/apt/sources.list && \
-    apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    git \
-    tzdata \
-    ffmpeg \
-    libturbojpeg0 \
-    libpcap0.8 \
-    libasound2 \
-    libv4l-0 \
-    build-essential \
-    libffi-dev \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+# 1. Atualiza libstdc++6 para resolver o erro GLIBCXX_3.4.29 (necessario para google_home / grpc)
+RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:ubuntu-toolchain-r/test && \
+    apt-get update && apt-get install -y --no-install-recommends libstdc++6 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# 2. Instala o uv e copia para /usr/local/bin
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    (cp /root/.local/bin/uv* /usr/local/bin/ 2>/dev/null || cp /root/.cargo/bin/uv* /usr/local/bin/ 2>/dev/null || true)
-
-# 3. Cria o ambiente virtual com Python 3.14 (com pip, setuptools e wheel pré-instalados)
-ARG PYTHON_VERSION=3.14
-RUN uv venv /homeassistant/.venv --python ${PYTHON_VERSION} --seed
-
-# 4. Instala a versao solicitada do Home Assistant usando uv pip
+# 2. Atualiza o Home Assistant para a versao mais recente
 ARG HA_VERSION=latest
-RUN if [ "$HA_VERSION" = "latest" ]; then \
-        uv pip install --python /homeassistant/.venv homeassistant; \
+RUN if [ "$HA_VERSION" = "latest" ] || [ -z "$HA_VERSION" ]; then \
+        /homeassistant/.venv/bin/pip install --no-cache-dir --upgrade homeassistant; \
     else \
-        uv pip install --python /homeassistant/.venv homeassistant==${HA_VERSION}; \
+        /homeassistant/.venv/bin/pip install --no-cache-dir homeassistant==${HA_VERSION}; \
     fi
 
 WORKDIR /config
