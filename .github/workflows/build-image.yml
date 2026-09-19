@@ -1,79 +1,88 @@
-name: Build Home Assistant QNAP 32K
+name: Build Home Assistant (QNAP armv7)
 
 on:
+  schedule:
+    - cron: "0 5 * * 1"
   workflow_dispatch:
     inputs:
       ha_version:
-        description: 'Versão do Home Assistant (ex: 2026.2.2 ou latest)'
+        description: "Versão do HA (vazio = mais recente compatível)"
         required: false
-        default: 'latest'
-        type: string
+        default: ""
   push:
-    branches:
-      - main
-      - master
     paths:
-      - 'Dockerfile'
-      - '.github/workflows/build-image.yml'
-  schedule:
-    # Executa semanalmente (domingo às 03:00 UTC) para manter a imagem sempre atualizada
-    - cron: '0 3 * * 0'
+      - Dockerfile
+      - .github/workflows/build-image.yml
 
 jobs:
   build:
-    name: Build & Push (linux/arm/v7)
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     permissions:
       contents: read
       packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/homeassistant-qnap
 
     steps:
-      - name: Checkout do repositório
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configurar QEMU (ARMv7)
-        uses: docker/setup-qemu-action@v3
+      - name: Descobrir versão do HA compatível com Python 3.13
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.ha_version }}" ]; then
+            echo "version=${{ github.event.inputs.ha_version }}" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          pip install -q packaging
+          V=$(python - <<'PY'
+          import json, urllib.request
+          from packaging.specifiers import SpecifierSet
+          from packaging.version import Version
+          d = json.load(urllib.request.urlopen("[pypi.org](https://pypi.org/pypi/homeassistant/json)"))
+          ok = []
+          for ver, files in d["releases"].items():
+              if not files: continue
+              try: v = Version(ver)
+              except Exception: continue
+              if v.is_prerelease: continue
+              rp = files[0].get("requires_python") or ""
+              if not rp or Version("3.13.0") in SpecifierSet(rp):
+                  ok.append(v)
+          print(max(ok))
+          PY
+          )
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Versão escolhida: $V"
+
+      - uses: docker/setup-qemu-action@v3
         with:
-          platforms: linux/arm/v7
+          platforms: arm
 
-      - name: Configurar Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Login no GitHub Container Registry (GHCR)
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determinar Versão do Home Assistant
-        id: vars
-        run: |
-          VERSION="${{ github.event.inputs.ha_version }}"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
-            LATEST_HA=$(curl -s https://pypi.org/pypi/homeassistant/json | jq -r .info.version)
-            if [ -n "$LATEST_HA" ] && [ "$LATEST_HA" != "null" ]; then
-              VERSION="$LATEST_HA"
-            else
-              VERSION="latest"
-            fi
-          fi
-          echo "target_version=$VERSION" >> $GITHUB_OUTPUT
-          # Converte o repositório para minúsculas para cumprir o padrão de tags Docker
-          IMAGE_NAME=$(echo "ghcr.io/${{ github.repository_owner }}/homeassistant-qnap-32k" | tr '[:upper:]' '[:lower:]')
-          echo "image_repo=$IMAGE_NAME" >> $GITHUB_ENV
-
-      - name: Construir e Enviar Imagem Docker
-        uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v6
+        env:
+          BUILDKIT_PROGRESS: plain
         with:
           context: .
-          file: ./Dockerfile
           platforms: linux/arm/v7
           push: true
+          provenance: false
+          sbom: false
           build-args: |
-            HA_VERSION=${{ steps.vars.outputs.target_version }}
+            HA_VERSION=${{ steps.ver.outputs.version }}
+            STRICT_ALIGN=1
           tags: |
-            ${{ env.image_repo }}:${{ steps.vars.outputs.target_version }}
-            ${{ env.image_repo }}:latest
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          outputs: type=registry,oci-mediatypes=false
+
