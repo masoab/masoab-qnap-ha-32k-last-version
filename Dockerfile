@@ -1,118 +1,72 @@
-# ==============================================================================
-# Home Assistant Container para QNAP NAS ARMv7 (Compatível com Páginas de 32 KB)
-# Base: Ubuntu 22.04 (Jammy) - Resolve GLIBCXX_3.4.29 e mantém suporte a 32K
-# ==============================================================================
-FROM ubuntu:22.04
+# syntax=docker/dockerfile:1.7
+################ builder ################
+FROM arm32v7/debian:trixie-slim AS builder
 
-# Variáveis de ambiente fundamentais
+ARG HA_VERSION=latest
+ARG STRICT_ALIGN=1
 ENV DEBIAN_FRONTEND=noninteractive \
-    TZ=UTC \
-    LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
-    DISABLE_JEMALLOC=true \
-    PATH="/homeassistant/.venv/bin:/usr/local/bin:$PATH" \
-    LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
+    VIRTUAL_ENV=/homeassistant/.venv \
+    PATH=/homeassistant/.venv/bin:$PATH \
+    PIP_EXTRA_INDEX_URL=[piwheels.org](https://www.piwheels.org/simple) \
+    PIP_PREFER_BINARY=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    LDFLAGS="-Wl,-z,max-page-size=32768 -Wl,-z,common-page-size=32768"
 
-# 1. Ativar repositórios universe e multiverse e instalar certificados/ferramentas base
-RUN sed -i 's/main restricted/main restricted universe multiverse/g' /etc/apt/sources.list && \
-    sed -i 's/main/main restricted universe multiverse/g' /etc/apt/sources.list && \
-    apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        gnupg && \
-    update-ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-# 2. Adicionar o PPA deadsnakes (Python 3.13) via chave GPG direta por HTTPS
-RUN mkdir -p /etc/apt/trusted.gpg.d /etc/apt/sources.list.d && \
-    curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xBA6932366A755776" | gpg --dearmor -o /etc/apt/trusted.gpg.d/deadsnakes.gpg && \
-    echo "deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu jammy main" > /etc/apt/sources.list.d/deadsnakes.list
-
-# 3. Instalar Python 3.13, compiladores e bibliotecas de sistema necessárias
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.13 \
-        python3.13-venv \
-        python3.13-dev \
-        build-essential \
-        pkg-config \
-        cmake \
-        autoconf \
-        cargo \
-        rustc \
-        git \
-        ffmpeg \
-        libavcodec-dev \
-        libavformat-dev \
-        libavutil-dev \
-        libswscale-dev \
-        libswresample-dev \
-        libffi-dev \
-        libssl-dev \
-        libjpeg-dev \
-        zlib1g-dev \
-        libopenblas-dev \
-        gfortran \
-        libturbojpeg0-dev \
-        libpcap-dev \
-        libasound2 \
-        libasound2-dev \
-        libv4l-0 \
-        libv4l-dev \
-        libimlib2-dev \
-        bluez \
-        tzdata && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+      python3 python3-venv python3-dev build-essential pkg-config \
+      cargo rustc git curl ca-certificates binutils \
+      libffi-dev libssl-dev zlib1g-dev libjpeg-dev libturbojpeg0-dev \
+      libxml2-dev libxslt1-dev libopenjp2-7-dev libudev-dev \
+      libavformat-dev libavcodec-dev libavdevice-dev libavutil-dev \
+      libswscale-dev libswresample-dev libavfilter-dev libpcap-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# 4. Compilar SQLite modernizado (Home Assistant exige SQLite >= 3.40.1 para o recorder)
-ARG SQLITE_VERSION="3460100"
-ARG SQLITE_YEAR="2024"
-RUN mkdir -p /tmp/sqlite && cd /tmp/sqlite && \
-    curl -sL "https://www.sqlite.org/${SQLITE_YEAR}/sqlite-autoconf-${SQLITE_VERSION}.tar.gz" | tar -xz --strip-components=1 && \
-    ./configure --prefix=/usr/local --enable-shared && \
-    make -j$(nproc) && \
-    make install && \
-    echo "/usr/local/lib" > /etc/ld.so.conf.d/00-local.conf && \
-    ldconfig && \
-    cd / && rm -rf /tmp/sqlite
+RUN python3 -m venv /homeassistant/.venv \
+ && pip install --upgrade pip setuptools wheel
 
-# 5. Baixar binário estático pré-compilado do go2rtc (AlexxIT) para ARM
-RUN curl -sL "https://github.com/AlexxIT/go2rtc/releases/latest/download/go2rtc_linux_arm" -o /usr/local/bin/go2rtc && \
-    chmod +x /usr/local/bin/go2rtc
-
-# 6. Compilar SSOCR (Seven Segment OCR)
-ARG SSOCR_VERSION="2.23.1"
-RUN mkdir -p /tmp/ssocr /opt/ssocr && \
-    curl -sL "https://github.com/auerswal/ssocr/archive/refs/tags/v${SSOCR_VERSION}.tar.gz" | tar -xz -C /tmp/ssocr --strip-components=1 && \
-    cd /tmp/ssocr && \
-    make -j$(nproc) && \
-    make PREFIX=/opt/ssocr install && \
-    ln -s /opt/ssocr/bin/ssocr /usr/local/bin/ssocr && \
-    cd / && rm -rf /tmp/ssocr
-
-# 7. Criar ambiente virtual e configurar Piwheels no PIP
-# CRÍTICO: Fornece rodas binárias pré-compiladas em ARMv7 para o Home Assistant e novas integrações
-RUN mkdir -p /homeassistant /config && \
-    python3.13 -m venv /homeassistant/.venv && \
-    mkdir -p /etc && \
-    printf "[global]\nextra-index-url = https://www.piwheels.org/simple\nprefer-binary = true\n" > /etc/pip.conf && \
-    /homeassistant/.venv/bin/pip install --no-cache-dir --upgrade pip wheel setuptools
-
-# 8. Instalar o Home Assistant
-ARG HA_VERSION="latest"
-ENV HA_VERSION=${HA_VERSION}
-
-RUN if [ "$HA_VERSION" = "latest" ] || [ -z "$HA_VERSION" ]; then \
-        /homeassistant/.venv/bin/pip install --no-cache-dir homeassistant; \
+# instalação em passos separados: se falhar, o log aponta o pacote exato
+RUN set -eux; \
+    if [ -z "$HA_VERSION" ] || [ "$HA_VERSION" = "latest" ]; then \
+        pip install -v homeassistant; \
     else \
-        /homeassistant/.venv/bin/pip install --no-cache-dir homeassistant==${HA_VERSION}; \
+        pip install -v "homeassistant==${HA_VERSION}"; \
     fi
 
-# Portas e volumes
+# dependências comuns que o core não puxa sozinho
+RUN pip install -v \
+      "PyTurboJPEG" "av" "mutagen" "pyudev" "zeroconf" "securetar" "psutil-home-assistant"
+
+# verificação de alinhamento de página (o requisito do QNAP)
+RUN set -eu; bad=0; \
+    for f in $(find /homeassistant/.venv -name '*.so' -o -name '*.so.*'); do \
+      a=$(readelf -lW "$f" 2>/dev/null | awk '$1=="LOAD"{print $NF}' | sort -u | head -1); \
+      case "$a" in 0x8000|0x10000|0x200000) ;; \
+        *) echo "ALINHAMENTO $a (<32K): $f"; bad=$((bad+1));; esac; \
+    done; \
+    echo "bibliotecas fora do padrão: $bad"; \
+    if [ "$STRICT_ALIGN" = "1" ] && [ "$bad" -gt 0 ]; then exit 1; fi
+
+################ runtime ################
+FROM arm32v7/debian:trixie-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    VIRTUAL_ENV=/homeassistant/.venv \
+    PATH=/homeassistant/.venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    TZ=Europe/Lisbon
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 libstdc++6 libgcc-s1 libffi8 libssl3 zlib1g \
+      libjpeg62-turbo libturbojpeg0 libxml2 libxslt1.1 libopenjp2-7 \
+      libudev1 libpcap0.8 ffmpeg tzdata bluez iputils-ping \
+      ca-certificates curl nano \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /homeassistant/.venv /homeassistant/.venv
+
+VOLUME /config
 EXPOSE 8123
-
-VOLUME ["/config"]
 WORKDIR /config
+CMD ["python3", "-m", "homeassistant", "--config", "/config"]
 
-# Inicialização
-CMD ["/homeassistant/.venv/bin/python3", "-m", "homeassistant", "-c", "/config"]
