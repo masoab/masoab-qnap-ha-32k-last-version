@@ -13,54 +13,58 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/homeassistant/.venv/bin:/usr/local/bin:$PATH" \
     LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
 
-# 1. Instalar dependências base do sistema e adicionar PPA deadsnakes (Python 3.13)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    gnupg \
-    software-properties-common \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    # Python 3.13 oficial pré-compilado para armhf
-    python3.13 \
-    python3.13-venv \
-    python3.13-dev \
-    # Compiladores e utilitários
-    build-essential \
-    pkg-config \
-    cmake \
-    autoconf \
-    cargo \
-    rustc \
-    git \
-    # Bibliotecas de multimídia, Bluetooth e rede
-    ffmpeg \
-    libavcodec-dev \
-    libavformat-dev \
-    libavutil-dev \
-    libswscale-dev \
-    libswresample-dev \
-    libffi-dev \
-    libssl-dev \
-    libjpeg-dev \
-    zlib1g-dev \
-    libopenblas-dev \
-    gfortran \
-    libturbojpeg0 \
-    libpcap-dev \
-    libasound2 \
-    libasound2-dev \
-    libv4l-0 \
-    libv4l-dev \
-    libimlib2-dev \
-    bluez \
-    tzdata \
-    && update-ca-certificates \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+# 1. Ativar repositórios universe e multiverse e instalar certificados/ferramentas base
+RUN sed -i 's/main restricted/main restricted universe multiverse/g' /etc/apt/sources.list && \
+    sed -i 's/main/main restricted universe multiverse/g' /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg && \
+    update-ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
-# 2. Compilar SQLite modernizado (Home Assistant exige SQLite >= 3.40.1 para o recorder)
-# O Ubuntu 22.04 nativo traz o 3.37.2, logo compilamos o 3.46.1 em /usr/local
+# 2. Adicionar o PPA deadsnakes (Python 3.13) via chave GPG direta por HTTPS
+RUN mkdir -p /etc/apt/trusted.gpg.d /etc/apt/sources.list.d && \
+    curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xBA6932366A755776" | gpg --dearmor -o /etc/apt/trusted.gpg.d/deadsnakes.gpg && \
+    echo "deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu jammy main" > /etc/apt/sources.list.d/deadsnakes.list
+
+# 3. Instalar Python 3.13, compiladores e bibliotecas de sistema necessárias
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.13 \
+        python3.13-venv \
+        python3.13-dev \
+        build-essential \
+        pkg-config \
+        cmake \
+        autoconf \
+        cargo \
+        rustc \
+        git \
+        ffmpeg \
+        libavcodec-dev \
+        libavformat-dev \
+        libavutil-dev \
+        libswscale-dev \
+        libswresample-dev \
+        libffi-dev \
+        libssl-dev \
+        libjpeg-dev \
+        zlib1g-dev \
+        libopenblas-dev \
+        gfortran \
+        libturbojpeg0-dev \
+        libpcap-dev \
+        libasound2 \
+        libasound2-dev \
+        libv4l-0 \
+        libv4l-dev \
+        libimlib2-dev \
+        bluez \
+        tzdata && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 4. Compilar SQLite modernizado (Home Assistant exige SQLite >= 3.40.1 para o recorder)
 ARG SQLITE_VERSION="3460100"
 ARG SQLITE_YEAR="2024"
 RUN mkdir -p /tmp/sqlite && cd /tmp/sqlite && \
@@ -72,11 +76,11 @@ RUN mkdir -p /tmp/sqlite && cd /tmp/sqlite && \
     ldconfig && \
     cd / && rm -rf /tmp/sqlite
 
-# 3. Baixar binário estático pré-compilado do go2rtc (AlexxIT) para ARM
+# 5. Baixar binário estático pré-compilado do go2rtc (AlexxIT) para ARM
 RUN curl -sL "https://github.com/AlexxIT/go2rtc/releases/latest/download/go2rtc_linux_arm" -o /usr/local/bin/go2rtc && \
     chmod +x /usr/local/bin/go2rtc
 
-# 4. Compilar SSOCR (Seven Segment Optical Character Recognition)
+# 6. Compilar SSOCR (Seven Segment OCR)
 ARG SSOCR_VERSION="2.23.1"
 RUN mkdir -p /tmp/ssocr /opt/ssocr && \
     curl -sL "https://github.com/auerswal/ssocr/archive/refs/tags/v${SSOCR_VERSION}.tar.gz" | tar -xz -C /tmp/ssocr --strip-components=1 && \
@@ -86,15 +90,15 @@ RUN mkdir -p /tmp/ssocr /opt/ssocr && \
     ln -s /opt/ssocr/bin/ssocr /usr/local/bin/ssocr && \
     cd / && rm -rf /tmp/ssocr
 
-# 5. Criar ambiente virtual e configurar Piwheels no PIP
-# CRÍTICO: Configura o Piwheels para fornecer wheels ARMv7 pré-compilados
+# 7. Criar ambiente virtual e configurar Piwheels no PIP
+# CRÍTICO: Fornece rodas binárias pré-compiladas em ARMv7 para o Home Assistant e novas integrações
 RUN mkdir -p /homeassistant /config && \
     python3.13 -m venv /homeassistant/.venv && \
     mkdir -p /etc && \
     printf "[global]\nextra-index-url = https://www.piwheels.org/simple\nprefer-binary = true\n" > /etc/pip.conf && \
     /homeassistant/.venv/bin/pip install --no-cache-dir --upgrade pip wheel setuptools
 
-# 6. Instalar o Home Assistant
+# 8. Instalar o Home Assistant
 ARG HA_VERSION="latest"
 ENV HA_VERSION=${HA_VERSION}
 
