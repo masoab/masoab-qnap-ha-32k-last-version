@@ -1,88 +1,78 @@
-name: Build Home Assistant (QNAP armv7)
+name: Build Home Assistant QNAP 32K
 
 on:
-  schedule:
-    - cron: "0 5 * * 1"
   workflow_dispatch:
     inputs:
       ha_version:
-        description: "Versão do HA (vazio = mais recente compatível)"
+        description: 'Versão do Home Assistant (deixe latest para a mais recente compatível)'
         required: false
-        default: ""
+        default: 'latest'
+        type: string
   push:
+    branches:
+      - main
+      - master
     paths:
-      - Dockerfile
-      - .github/workflows/build-image.yml
+      - 'Dockerfile'
+      - '.github/workflows/build-image.yml'
+  schedule:
+    # Executa semanalmente aos domingos às 03:00 UTC
+    - cron: '0 3 * * 0'
 
 jobs:
   build:
+    name: Build & Push (linux/arm/v7)
     runs-on: ubuntu-latest
-    timeout-minutes: 360
     permissions:
       contents: read
       packages: write
-    env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/homeassistant-qnap
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
 
-      - name: Descobrir versão do HA compatível com Python 3.13
-        id: ver
-        run: |
-          set -euo pipefail
-          if [ -n "${{ github.event.inputs.ha_version }}" ]; then
-            echo "version=${{ github.event.inputs.ha_version }}" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          pip install -q packaging
-          V=$(python - <<'PY'
-          import json, urllib.request
-          from packaging.specifiers import SpecifierSet
-          from packaging.version import Version
-          d = json.load(urllib.request.urlopen("[pypi.org](https://pypi.org/pypi/homeassistant/json)"))
-          ok = []
-          for ver, files in d["releases"].items():
-              if not files: continue
-              try: v = Version(ver)
-              except Exception: continue
-              if v.is_prerelease: continue
-              rp = files[0].get("requires_python") or ""
-              if not rp or Version("3.13.0") in SpecifierSet(rp):
-                  ok.append(v)
-          print(max(ok))
-          PY
-          )
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "Versão escolhida: $V"
-
-      - uses: docker/setup-qemu-action@v3
+      - name: Configurar QEMU (ARMv7)
+        uses: docker/setup-qemu-action@v3
         with:
-          platforms: arm
+          platforms: linux/arm/v7
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      - name: Login no GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
-        env:
-          BUILDKIT_PROGRESS: plain
+      - name: Determinar Versão do Home Assistant
+        id: vars
+        run: |
+          VERSION="${{ github.event.inputs.ha_version }}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
+            # Descobre dinamicamente a versão estável mais recente compatível com Python 3.13
+            VERSION=$(python3 -c "import urllib.request, json; data = json.loads(urllib.request.urlopen('https://pypi.org/pypi/homeassistant/json').read()); print([v for v in reversed(list(data['releases'].keys())) if data['releases'][v] and '3.14' not in (data['releases'][v][0].get('requires_python') or '') and '3.15' not in (data['releases'][v][0].get('requires_python') or '') and v.startswith('202') and 'b' not in v][0])")
+            if [ -z "$VERSION" ]; then
+              VERSION="2026.2.3"
+            fi
+          fi
+          echo "target_version=$VERSION" >> $GITHUB_OUTPUT
+          IMAGE_NAME=$(echo "ghcr.io/${{ github.repository_owner }}/homeassistant-qnap-32k" | tr '[:upper:]' '[:lower:]')
+          echo "image_repo=$IMAGE_NAME" >> $GITHUB_ENV
+          echo "Versao selecionada para instalacao: $VERSION"
+
+      - name: Construir e Enviar Imagem Docker
+        uses: docker/build-push-action@v6
         with:
           context: .
+          file: ./Dockerfile
           platforms: linux/arm/v7
           push: true
-          provenance: false
-          sbom: false
           build-args: |
-            HA_VERSION=${{ steps.ver.outputs.version }}
-            STRICT_ALIGN=1
+            HA_VERSION=${{ steps.vars.outputs.target_version }}
           tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+            ${{ env.image_repo }}:${{ steps.vars.outputs.target_version }}
+            ${{ env.image_repo }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          outputs: type=registry,oci-mediatypes=false
-
