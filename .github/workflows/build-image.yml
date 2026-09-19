@@ -1,75 +1,79 @@
-name: Build Home Assistant (Latest / Auto 32K)
+name: Build Home Assistant QNAP 32K
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Versao do Home Assistant (deixe "latest" para a mais recente)'
+      ha_version:
+        description: 'Versão do Home Assistant (ex: 2026.2.2 ou latest)'
         required: false
         default: 'latest'
-  schedule:
-    # Roda automaticamente todo domingo as 03:00 UTC para manter sempre a versao mais recente
-    - cron: '0 3 * * 0'
+        type: string
   push:
     branches:
       - main
-
-permissions:
-  contents: read
-  packages: write
+      - master
+    paths:
+      - 'Dockerfile'
+      - '.github/workflows/build-image.yml'
+  schedule:
+    # Executa semanalmente (domingo às 03:00 UTC) para manter a imagem sempre atualizada
+    - cron: '0 3 * * 0'
 
 jobs:
   build:
+    name: Build & Push (linux/arm/v7)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
     steps:
-      - name: Checkout repository
+      - name: Checkout do repositório
         uses: actions/checkout@v4
 
-      - name: Detectar versao do Home Assistant e configurar tags
-        id: setup_version
-        run: |
-          REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE="ghcr.io/${REPO_OWNER}/homeassistant-qnap-32k"
-          echo "IMAGE=${IMAGE}" >> $GITHUB_ENV
-
-          INPUT_VER="${{ github.event.inputs.version }}"
-          if [ -z "$INPUT_VER" ] || [ "$INPUT_VER" = "latest" ]; then
-            LATEST_TAG=$(curl -s https://api.github.com/repos/home-assistant/core/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-            echo "Ultima versao oficial detectada: ${LATEST_TAG}"
-            TARGET_VERSION="${LATEST_TAG}"
-          else
-            echo "Versao manual solicitada: ${INPUT_VER}"
-            TARGET_VERSION="${INPUT_VER}"
-          fi
-          
-          echo "HA_VERSION=${TARGET_VERSION}" >> $GITHUB_ENV
-          echo "TAG_EXACT=${IMAGE}:${TARGET_VERSION}" >> $GITHUB_ENV
-          echo "TAG_LATEST=${IMAGE}:latest" >> $GITHUB_ENV
-
-      - name: Set up QEMU (Emulador ARM)
+      - name: Configurar QEMU (ARMv7)
         uses: docker/setup-qemu-action@v3
         with:
           platforms: linux/arm/v7
 
-      - name: Set up Docker Buildx
+      - name: Configurar Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
+      - name: Login no GitHub Container Registry (GHCR)
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+      - name: Determinar Versão do Home Assistant
+        id: vars
+        run: |
+          VERSION="${{ github.event.inputs.ha_version }}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
+            LATEST_HA=$(curl -s https://pypi.org/pypi/homeassistant/json | jq -r .info.version)
+            if [ -n "$LATEST_HA" ] && [ "$LATEST_HA" != "null" ]; then
+              VERSION="$LATEST_HA"
+            else
+              VERSION="latest"
+            fi
+          fi
+          echo "target_version=$VERSION" >> $GITHUB_OUTPUT
+          # Converte o repositório para minúsculas para cumprir o padrão de tags Docker
+          IMAGE_NAME=$(echo "ghcr.io/${{ github.repository_owner }}/homeassistant-qnap-32k" | tr '[:upper:]' '[:lower:]')
+          echo "image_repo=$IMAGE_NAME" >> $GITHUB_ENV
+
+      - name: Construir e Enviar Imagem Docker
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/arm/v7
           push: true
           build-args: |
-            HA_VERSION=${{ env.HA_VERSION }}
+            HA_VERSION=${{ steps.vars.outputs.target_version }}
           tags: |
-            ${{ env.TAG_EXACT }}
-            ${{ env.TAG_LATEST }}
+            ${{ env.image_repo }}:${{ steps.vars.outputs.target_version }}
+            ${{ env.image_repo }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
